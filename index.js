@@ -34,7 +34,7 @@ db.connect((err) => {
   console.log("Connected to MySQL database");
 });
 
-app.get("/health", (req, res) => {
+app.get("/api/health", (req, res) => {
   res.send("CCA Backend is running");
 });
 
