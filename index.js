@@ -34,6 +34,10 @@ db.connect((err) => {
   console.log("Connected to MySQL database");
 });
 
+app.get("/health", (req, res) => {
+  res.send("CCA Backend is running");
+});
+
 // Endpoint to handle the form submission
 app.post("/submit-entry", (req, res) => {
   const {
