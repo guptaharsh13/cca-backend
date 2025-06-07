@@ -39,7 +39,7 @@ app.get("/api/health", (req, res) => {
 });
 
 // Endpoint to handle the form submission
-app.post("/submit-entry", (req, res) => {
+app.post("/api/submit-entry", (req, res) => {
   const {
     full_name,
     email_address,
