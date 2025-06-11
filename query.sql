@@ -26,3 +26,5 @@ CREATE TABLE submissions (
     visual_link TEXT,
     why_outstanding TEXT
 );
+
+ALTER TABLE submissions CHANGE COLUMN visual_link visual_links TEXT;

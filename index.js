@@ -33,28 +33,41 @@ const S3_BUCKET_NAME = process.env.S3_BUCKET_NAME;
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  // limits: {
-  //   fileSize: 10 * 1024 * 1024, // 10MB limit
-  // },
-  // fileFilter: (req, file, cb) => {
-  //   // Allow common image and document formats
-  //   const allowedMimes = [
-  //     "image/jpeg",
-  //     "image/png",
-  //     "image/gif",
-  //     "application/pdf",
-  //     "application/msword",
-  //     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  //   ];
+  fileFilter: (req, file, cb) => {
+    // Allow specified file formats
+    const allowedMimes = [
+      // PDF
+      "application/pdf",
+      // Word Documents
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      // Images
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/tiff",
+      "image/tif",
+      // Videos
+      "video/mp4",
+      "video/quicktime", // .mov
+      "video/x-msvideo", // .avi
+      // Audio
+      "audio/mpeg", // .mp3
+      "audio/wav",
+      "audio/wave",
+      "audio/x-wav",
+    ];
 
-  //   if (allowedMimes.includes(file.mimetype)) {
-  //     cb(null, true);
-  //   } else {
-  //     cb(
-  //       new Error("Invalid file type. Only images and documents are allowed.")
-  //     );
-  //   }
-  // },
+    if (allowedMimes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Invalid file type. Only PDF, Word documents, JPEG, PNG, TIFF, MP4, MOV, AVI, MP3, and WAV files are allowed."
+        )
+      );
+    }
+  },
 });
 
 // Function to upload file to S3
@@ -64,6 +77,7 @@ async function uploadToS3(file, fileName) {
     Key: fileName,
     Body: file.buffer,
     ContentType: file.mimetype,
+    // ACL: "public-read",
   };
 
   try {
@@ -76,6 +90,28 @@ async function uploadToS3(file, fileName) {
     }.amazonaws.com/${fileName}`;
   } catch (error) {
     console.error("Error uploading to S3:", error);
+    throw error;
+  }
+}
+
+// Function to upload multiple files to S3
+async function uploadMultipleFilesToS3(files) {
+  if (!files || files.length === 0) {
+    return null;
+  }
+
+  const uploadPromises = files.map(async (file) => {
+    const timestamp = Date.now();
+    const randomId = Math.random().toString(36).substring(2, 15);
+    const fileName = `ccapatrika/${timestamp}-${randomId}-${file.originalname}`;
+    return await uploadToS3(file, fileName);
+  });
+
+  try {
+    const uploadedUrls = await Promise.all(uploadPromises);
+    return uploadedUrls.join(",");
+  } catch (error) {
+    console.error("Error uploading multiple files to S3:", error);
     throw error;
   }
 }
@@ -102,10 +138,10 @@ app.get("/api/health", (req, res) => {
   res.send("CCA Backend is running");
 });
 
-// Endpoint to handle the form submission with file upload
+// Endpoint to handle the form submission with multiple file uploads
 app.post(
   "/api/submit-entry",
-  upload.single("visual_file"),
+  upload.array("visual_files"),
   async (req, res) => {
     try {
       const {
@@ -135,45 +171,43 @@ app.post(
         why_outstanding,
       } = req.body;
 
-      let visual_link = null;
+      let visual_links = null;
 
-      // Handle file upload if present
-      if (req.file) {
-        const timestamp = Date.now();
-        const fileName = `ccapatrika/${timestamp}-${req.file.originalname}`;
-        visual_link = await uploadToS3(req.file, fileName);
+      // Handle multiple file uploads if present
+      if (req.files && req.files.length > 0) {
+        visual_links = await uploadMultipleFilesToS3(req.files);
       }
 
       const query = `
-      INSERT INTO submissions (
-        full_name,
-        email_address,
-        contact_number,
-        submission_capacity,
-        team_members,
-        prize_cheque_name,
-        consent_declarations,
-        challenge,
-        insight,
-        strategic_idea,
-        strategy_execution,
-        expected_results,
-        entry_topic,
-        concept_strategy,
-        objective,
-        rationale,
-        measurement,
-        insight_description,
-        strategic_solution,
-        creative_plan,
-        communication_strategy,
-        result_impact,
-        result_scope,
-        visual_link,
-        why_outstanding
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-    `;
+        INSERT INTO submissions (
+          full_name,
+          email_address,
+          contact_number,
+          submission_capacity,
+          team_members,
+          prize_cheque_name,
+          consent_declarations,
+          challenge,
+          insight,
+          strategic_idea,
+          strategy_execution,
+          expected_results,
+          entry_topic,
+          concept_strategy,
+          objective,
+          rationale,
+          measurement,
+          insight_description,
+          strategic_solution,
+          creative_plan,
+          communication_strategy,
+          result_impact,
+          result_scope,
+          visual_links,
+          why_outstanding
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
 
       const values = [
         full_name,
@@ -199,20 +233,52 @@ app.post(
         communication_strategy,
         result_impact,
         result_scope,
-        visual_link,
+        visual_links,
         why_outstanding,
       ];
 
-      db.query(query, values, (err, result) => {
-        if (err) {
-          console.error("Error inserting data:", err);
-          return res.status(500).json({ message: "Error saving the entry." });
-        }
+      // Use promise-based query for better error handling
+      const promiseDb = db.promise();
+
+      try {
+        const [result] = await promiseDb.execute(query, values);
+        console.log("Insert successful, ID:", result.insertId);
+
         res.status(200).json({
           message: "Entry successfully submitted!",
-          visual_link: visual_link,
+          visual_links: visual_links,
+          entry_id: result.insertId,
         });
-      });
+      } catch (err) {
+        console.error("Error inserting data:", err);
+        console.error("SQL State:", err.sqlState);
+        console.error("Error Code:", err.code);
+        console.error("SQL Message:", err.sqlMessage);
+
+        // Check if it's specifically the visual_links column issue
+        if (
+          err.code === "ER_BAD_FIELD_ERROR" &&
+          err.sqlMessage.includes("visual_links")
+        ) {
+          console.error("CRITICAL: visual_links column issue detected");
+
+          // Try to re-verify the column exists
+          try {
+            const [columns] = await promiseDb.execute(
+              "SHOW COLUMNS FROM submissions LIKE 'visual_links'"
+            );
+            console.log("Column check result:", columns);
+          } catch (checkErr) {
+            console.error("Error checking column:", checkErr);
+          }
+        }
+
+        return res.status(500).json({
+          message: "Error saving the entry.",
+          error:
+            process.env.NODE_ENV === "development" ? err.message : undefined,
+        });
+      }
     } catch (error) {
       console.error("Error processing submission:", error);
       res.status(500).json({
