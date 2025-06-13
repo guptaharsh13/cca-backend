@@ -9,12 +9,47 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 
 dotenv.config();
 
+// Validate required environment variables
+const requiredEnvVars = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "S3_BUCKET_NAME",
+  "DB_HOST",
+  "DB_USER",
+  "DB_PASS",
+  "DB_NAME",
+];
+
+const missingVars = requiredEnvVars.filter((varName) => !process.env[varName]);
+if (missingVars.length > 0) {
+  console.error("❌ Missing required environment variables:");
+  missingVars.forEach((varName) => {
+    console.error(`   - ${varName}`);
+  });
+  console.error("\nPlease create a .env file with the required variables.");
+  console.error("Example .env file:");
+  console.error(`
+AWS_ACCESS_KEY_ID=your_aws_access_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+S3_BUCKET_NAME=your_s3_bucket_name
+AWS_REGION=ap-south-1
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASS=your_db_password
+DB_NAME=cca_responses
+PORT=3001
+  `);
+  process.exit(1);
+}
+
 const app = express();
 
 app.use(cors());
 app.use(helmet());
 app.use(morgan("common"));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const port = process.env.PORT || 3001;
 
@@ -116,26 +151,68 @@ async function uploadMultipleFilesToS3(files) {
   }
 }
 
-// MySQL Database connection setup
-const db = mysql.createConnection({
+// MySQL Database connection setup with connection pooling
+const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
   port: process.env.DB_PORT || 3306,
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASS || "",
   database: process.env.DB_NAME || "cca_responses",
+  waitForConnections: true,
+  connectionLimit: 10,
+  maxIdle: 10,
+  idleTimeout: 60000,
+  queueLimit: 0,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
 });
 
-// Test database connection
-db.connect((err) => {
-  if (err) {
+// Test database connection with retry logic
+async function testDatabaseConnection() {
+  try {
+    const connection = await pool.promise().getConnection();
+    console.log("Connected to MySQL database successfully");
+    connection.release();
+  } catch (err) {
     console.error("Error connecting to the database:", err);
-    return;
+    console.log("Retrying database connection in 5 seconds...");
+    setTimeout(testDatabaseConnection, 5000);
   }
-  console.log("Connected to MySQL database");
+}
+
+// Handle pool errors
+pool.on("error", function (err) {
+  console.error("Database pool error:", err);
+  if (err.code === "PROTOCOL_CONNECTION_LOST") {
+    console.log("Database connection lost, pool will handle reconnection");
+  } else {
+    throw err;
+  }
 });
+
+testDatabaseConnection();
 
 app.get("/api/health", (req, res) => {
   res.send("CCA Backend is running");
+});
+
+// Debug endpoint to test form submissions
+app.post("/api/test-form", upload.array("visual_files"), (req, res) => {
+  console.log("=== DEBUG FORM TEST ===");
+  console.log("Headers:", req.headers);
+  console.log("Body:", req.body);
+  console.log("Body keys:", Object.keys(req.body || {}));
+  console.log("Files:", req.files ? req.files.length : 0);
+  console.log("Raw body type:", typeof req.body);
+  console.log("========================");
+
+  res.json({
+    message: "Form test successful",
+    body: req.body,
+    bodyKeys: Object.keys(req.body || {}),
+    filesCount: req.files ? req.files.length : 0,
+    hasFullName: !!(req.body && req.body.full_name),
+  });
 });
 
 // Endpoint to handle the form submission with multiple file uploads
@@ -144,6 +221,19 @@ app.post(
   upload.array("visual_files"),
   async (req, res) => {
     try {
+      console.log("Received submission request");
+      console.log("Body:", req.body);
+      console.log("Files:", req.files ? req.files.length : 0);
+
+      // Check if req.body exists and has data
+      if (!req.body || Object.keys(req.body).length === 0) {
+        console.error("req.body is empty or undefined");
+        return res.status(400).json({
+          message:
+            "No form data received. Please ensure you're sending the form data correctly.",
+        });
+      }
+
       const {
         full_name,
         email_address,
@@ -171,11 +261,21 @@ app.post(
         why_outstanding,
       } = req.body;
 
+      // Validate required fields
+      if (!full_name || !email_address) {
+        return res.status(400).json({
+          message:
+            "Missing required fields: full_name and email_address are required.",
+        });
+      }
+
       let visual_links = null;
 
       // Handle multiple file uploads if present
       if (req.files && req.files.length > 0) {
+        console.log(`Uploading ${req.files.length} files to S3...`);
         visual_links = await uploadMultipleFilesToS3(req.files);
+        console.log("Files uploaded successfully:", visual_links);
       }
 
       const query = `
@@ -237,8 +337,10 @@ app.post(
         why_outstanding,
       ];
 
+      console.log("Attempting to insert data into database...");
+
       // Use promise-based query for better error handling
-      const promiseDb = db.promise();
+      const promiseDb = pool.promise();
 
       try {
         const [result] = await promiseDb.execute(query, values);
@@ -258,6 +360,7 @@ app.post(
         // Check if it's specifically the visual_links column issue
         if (
           err.code === "ER_BAD_FIELD_ERROR" &&
+          err.sqlMessage &&
           err.sqlMessage.includes("visual_links")
         ) {
           console.error("CRITICAL: visual_links column issue detected");
@@ -276,7 +379,9 @@ app.post(
         return res.status(500).json({
           message: "Error saving the entry.",
           error:
-            process.env.NODE_ENV === "development" ? err.message : undefined,
+            process.env.NODE_ENV === "development"
+              ? err.message
+              : "Database error occurred",
         });
       }
     } catch (error) {
